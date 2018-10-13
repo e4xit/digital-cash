@@ -1,7 +1,3 @@
-"""
-* comparisons are a PITA here. so absurd that VerifyingKey.to_string() must be called
-* sucks that all my classes need __eq__ methods
-"""
 import uuid
 from copy import deepcopy
 from ecdsa import SigningKey, SECP256k1
@@ -23,10 +19,9 @@ class Transfer:
 
     def __eq__(self, other):
         return self.signature == other.signature and \
-               self.public_key.to_string() == other.public_key.to_string()
+               self.public_key.to_string() == \
+               other.public_key.to_string()
 
-    def __repr__(self):
-        return f"Transfer(signature={self.signature}, public_key_bytes={self.public_key.to_string()}"
 
 class BankCoin:
 
@@ -35,36 +30,37 @@ class BankCoin:
         self.transfers = transfers
 
     def __eq__(self, other):
-        return str(self.id) == str(other.id) and self.transfers == other.transfers
-
-    def __repr__(self):
-        return f"BankCoin(transfers={self.transfers})"
+        return str(self.id) == str(other.id) and \
+               self.transfers == other.transfers
 
     @property
     def last_transfer(self):
         return self.transfers[-1]
 
-
     def transfer(self, owner_private_key, recipient_public_key):
-        """Appends to self.transfers"""
-        message = transfer_message(self.last_transfer.signature, recipient_public_key)
+        message = transfer_message(self.last_transfer.signature, 
+                                   recipient_public_key)
         transfer = Transfer(
             signature=owner_private_key.sign(message),
             public_key=recipient_public_key,
         )
         self.transfers.append(transfer)
 
+    def validate(self):
+        # Check the subsequent transfers
+        previous_transfer = self.transfers[0]
+        for transfer in self.transfers[1:]:
+            # Check previous owner signed this transfer using their private key
+            assert previous_transfer.public_key.verify(
+                transfer.signature,
+                transfer_message(previous_transfer.signature, transfer.public_key),
+            )
+            # Next loop we treat transfer as previous_transfer
+            previous_transfer = transfer
 
 class Bank:
 
-    def __init__(self, private_key=None):
-        # TODO since users don't validate txns anymore
-        # the bank probably doesn't need to give out signatures
-        if not private_key:
-            private_key = SigningKey.generate(curve=SECP256k1)
-        self.private_key = private_key
-        self.public_key = private_key.get_verifying_key()
-
+    def __init__(self):
         # This is our single source of truth
         self.coins = {}
 
@@ -73,9 +69,8 @@ class Bank:
         message = serialize(public_key)
         
         # Create the first transfer, signing with the banks private key
-        signature = self.private_key.sign(message)
         transfer = Transfer(
-            signature=signature,
+            signature=None,
             public_key=public_key,
         )
         
@@ -95,7 +90,7 @@ class Bank:
                coin.transfers[:len(last_observation.transfers)]
 
         # Check that transfer history is good
-        self.validate_transfers(coin)
+        coin.validate()
 
         # Update bank database.
         self.coins[coin.id] = deepcopy(coin)
@@ -107,19 +102,3 @@ class Bank:
                 coins.append(coin)
         return coins
 
-    def validate_transfers(self, coin):
-        # Check the first transfer
-        transfer = coin.transfers[0]
-        message = serialize(transfer.public_key)
-        assert self.public_key.verify(transfer.signature, message)
-
-        # Check the subsequent transfers
-        previous_transfer = coin.transfers[0]
-        for transfer in coin.transfers[1:]:
-            # Check previous owner signed this transfer using their private key
-            assert previous_transfer.public_key.verify(
-                transfer.signature,
-                transfer_message(previous_transfer.signature, transfer.public_key),
-            )
-            # Next loop we treat transfer as previous_transfer
-            previous_transfer = transfer
