@@ -2,7 +2,7 @@
 BanknetCoin
 
 Usage:
-  banknetcoin.py server
+  banknetcoin.py serve
   banknetcoin.py ping
   banknetcoin.py tx <from> <to> <amount>
   banknetcoin.py balance <name>
@@ -16,9 +16,16 @@ import uuid, socketserver, socket, sys, argparse
 from docopt import docopt
 from copy import deepcopy
 from ecdsa import SigningKey, SECP256k1
-from utils import serialize, deserialize
+from utils import serialize, deserialize, prepare_simple_tx
 
-from identities import lookup_key
+from identities import user_public_key, user_private_key
+
+
+
+def spend_message(tx, index):
+    outpoint = tx.tx_ins[index].outpoint
+    return serialize(outpoint) + serialize(tx.tx_outs)
+
 
 class Tx:
 
@@ -28,8 +35,14 @@ class Tx:
         self.tx_outs = tx_outs
 
     def sign_input(self, index, private_key):
-        signature = private_key.sign(self.tx_ins[index].spend_message)
+        message = spend_message(self, index)
+        signature = private_key.sign(message)
         self.tx_ins[index].signature = signature
+
+    def verify_input(self, index, public_key):
+        tx_in = self.tx_ins[index]
+        message = spend_message(self, index)
+        return public_key.verify(tx_in.signature, message)
 
 class TxIn:
 
@@ -37,11 +50,6 @@ class TxIn:
         self.tx_id = tx_id
         self.index = index
         self.signature = signature
-
-    @property
-    def spend_message(self):
-        # FIXME: we need something about the recipient here ...
-        return f"{self.tx_id}:{self.index}".encode()
 
     @property
     def outpoint(self):
@@ -62,13 +70,13 @@ class TxOut:
 class Bank:
 
     def __init__(self):
-        self.utxo = {}
+        self.utxo_set = {}
 
-    def update_utxo(self, tx):
+    def update_utxo_set(self, tx):
         for tx_out in tx.tx_outs:
-            self.utxo[tx_out.outpoint] = tx_out
+            self.utxo_set[tx_out.outpoint] = tx_out
         for tx_in in tx.tx_ins:
-            del self.utxo[tx_in.outpoint]
+            del self.utxo_set[tx_in.outpoint]
 
     def issue(self, amount, public_key):
         id_ = str(uuid.uuid4())
@@ -76,20 +84,23 @@ class Bank:
         tx_outs = [TxOut(tx_id=id_, index=0, amount=amount, public_key=public_key)]
         tx = Tx(id=id_, tx_ins=tx_ins, tx_outs=tx_outs)
 
-        self.update_utxo(tx)
+        self.update_utxo_set(tx)
 
         return tx
 
     def validate_tx(self, tx):
         in_sum = 0
         out_sum = 0
-        for tx_in in tx.tx_ins:
-            assert tx_in.outpoint in self.utxo
+        for index, tx_in in enumerate(tx.tx_ins):
+            # TxIn spending unspent output
+            assert tx_in.outpoint in self.utxo_set
 
-            tx_out = self.utxo[tx_in.outpoint]
+            # Grab the tx_out
+            tx_out = self.utxo_set[tx_in.outpoint]
+
             # Verify signature using public key of TxOut we're spending
             public_key = tx_out.public_key
-            public_key.verify(tx_in.signature, tx_in.spend_message)
+            tx.verify_input(index, public_key)
 
             # Sum up the total inputs
             amount = tx_out.amount
@@ -101,19 +112,19 @@ class Bank:
         assert in_sum == out_sum
 
     def handle_tx(self, tx):
-        # Save to self.utxo if it's valid
+        # Save to self.utxo_set if it's valid
         self.validate_tx(tx)
-        self.update_utxo(tx)
+        self.update_utxo_set(tx)
 
-    def fetch_utxo(self, public_key):
-        return [utxo for utxo in self.utxo.values() 
-                if utxo.public_key.to_string() == public_key.to_string()]
+    def fetch_utxos(self, public_key):
+        return [utxo for utxo in self.utxo_set.values() 
+                if utxo.public_key == public_key]
 
     def fetch_balance(self, public_key):
-        # Fetch utxo associated with this public key
-        unspents = self.fetch_utxo(public_key)
+        # Fetch utxos associated with this public key
+        utxos = self.fetch_utxos(public_key)
         # Sum the amounts
-        return sum([tx_out.amount for tx_out in unspents])
+        return sum([tx_out.amount for tx_out in utxos])
 
 
 def prepare_message(command, data):
@@ -130,7 +141,7 @@ class TCPHandler(socketserver.BaseRequestHandler):
         return self.request.sendall(serialize(response))
 
     def handle(self):
-        message_bytes = self.request.recv(1024*4).strip()
+        message_bytes = self.request.recv(1000).strip()
         message = deserialize(message_bytes)
         command = message["command"]
         data = message["data"]
@@ -145,71 +156,63 @@ class TCPHandler(socketserver.BaseRequestHandler):
             except:
                 self.respond(command="tx-response", data="rejected")
 
+        if command == "utxos":
+            balance = bank.fetch_utxos(data)
+            self.respond(command="utxos-response", data=balance)
+
         if command == "balance":
             balance = bank.fetch_balance(data)
             self.respond(command="balance-response", data=balance)
 
 
 HOST, PORT = 'localhost', 9002
+ADDRESS = (HOST, PORT)
 bank = Bank()
 
 
-def server():
-    server = socketserver.TCPServer((HOST, PORT), TCPHandler)
+def serve():
+    server = socketserver.TCPServer(ADDRESS, TCPHandler)
     server.serve_forever()
 
-
-def send_value():
-    pass
-
-
-def connect(command, data):
+def send_message(address, command, data, response=False):
     message = prepare_message(command, data)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((HOST, PORT))
+        s.connect(address)
         s.sendall(serialize(message))
-        _data = s.recv(1024*4)
-        data = deserialize(_data)
-
-    print('Received', data)
-    return data
-
+        if response:
+            return deserialize(s.recv(5000))
 
 def main(args):
-    if args["server"]:
+    if args["serve"]:
         from identities import alice_public_key
         bank.issue(1000, alice_public_key)
-        server()
+        serve()
     elif args["ping"]:
-        connect("ping", "")
+        response = send_message(ADDRESS, "ping", "", response=True)
+        print(response)
     elif args["balance"]:
         name = args["<name>"]
-        private_key = lookup_key(name)
-        public_key = private_key.get_verifying_key()
-        connect("balance", public_key)
+        public_key = user_public_key(name)
+        response = send_message(ADDRESS, "balance", public_key, response=True)
+        print(response)
     elif args["tx"]:
-        sender_private_key = lookup_key(args["<from>"])
+        # Grab parameters
+        sender_private_key = user_private_key(args["<from>"])
         sender_public_key = sender_private_key.get_verifying_key()
-        recipient_private_key = lookup_key(args["<to>"])
+        recipient_private_key = user_private_key(args["<to>"])
         recipient_public_key = recipient_private_key.get_verifying_key()
         amount = int(args["<amount>"])
 
-        utxo = bank.fetch_utxo(sender_public_key)
-        utxo_sum = sum([u.amount for u in utxo])
+        # Fetch utxos available to spend
+        response = send_message(ADDRESS, "utxos", sender_public_key, response=True)
+        utxos = response["data"]
 
-        tx_ins = [
-            TxIn(tx_id=tx_out.tx_id, index=tx_out.index, signature=None)
-            for tx_out in utxo
-        ]
-        tx_id = uuid.uuid4()
-        tx_outs = [
-            TxOut(tx_id=tx_id, index=0, amount=amount, public_key=recipient_public_key), 
-            TxOut(tx_id=tx_id, index=1, amount=utxo_sum-amount, public_key=sender_public_key),
-        ]
-        tx = Tx(id=tx_id, tx_ins=tx_ins, tx_outs=tx_outs)
-        for i in range(len(tx.tx_ins)):
-            tx.sign_input(i, sender_public_key)
-        connect("tx", tx)
+        # Prepare transaction
+        tx = prepare_simple_tx(utxos, sender_private_key, recipient_public_key, amount)
+
+        # send to bank
+        response = send_message(ADDRESS, "tx", tx, response=True)
+        print(response)
     else:
         print("Invalid commands")
 
