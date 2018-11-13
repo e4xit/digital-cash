@@ -1,24 +1,34 @@
 """
-BanknetCoin
+Blockcoin
 
 Usage:
-  banknetcoin.py serve
-  banknetcoin.py ping
-  banknetcoin.py tx <from> <to> <amount>
-  banknetcoin.py balance <name>
+myblockcoin.py serve
+myblockcoin.py ping
+myblockcoin.py tx <from> <to> <amount>
+myblockcoin.py balance <name>
 
 Options:
   -h --help     Show this screen.
 """
 
-import uuid, socketserver, socket, sys, argparse
+import uuid, socketserver, socket, sys, argparse, time, os, logging, threading
 
 from docopt import docopt
 from copy import deepcopy
 from ecdsa import SigningKey, SECP256k1
 from utils import serialize, deserialize, prepare_simple_tx
 
-from identities import user_public_key, user_private_key
+from identities import user_public_key, user_private_key, bank_public_key, bank_private_key, airdrop_tx
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)-15s %(levelname)s %(message)s')
+logger = logging.getLogger(__name__)
+
+
+
+BLOCK_TIME = 5
+NUM_BANKS = 3
 
 
 
@@ -67,10 +77,46 @@ class TxOut:
     def outpoint(self):
         return (self.tx_id, self.index)
 
+class Block:
+
+    # signature here will prove the bank has the right to create the new block
+    def __init__(self, txns, timestamp=None, signature=None):
+        if timestamp == None:
+            timestamp = time.time()
+        self.timestamp = timestamp
+        self.signature = signature
+        self.txns = txns
+
+    @property
+    def message(self):
+        data = [self.timestamp, self.txns]
+        return serialize(data)
+
+    def sign(self, private_key):
+        self.signature = private_key.sign(self.message)
+
+
+
 class Bank:
 
-    def __init__(self):
+    def __init__(self, id, private_key):
+        self.id = id
+        self.private_key = private_key
+        self.blocks = []
         self.utxo_set = {}
+        self.mempool = []
+        self.peer_addresses = {(hostname, PORT) for hostname
+                               in os.environ['PEERS'].split(',')}
+
+    @property
+    def next_id(self):
+        # who's turn is it to produce the next block?
+        return len(self.blocks) % NUM_BANKS
+
+    @property
+    def our_turn(self):
+        return self.id == self.next_id
+
 
     def update_utxo_set(self, tx):
         for tx_out in tx.tx_outs:
@@ -116,6 +162,27 @@ class Bank:
         self.validate_tx(tx)
         self.update_utxo_set(tx)
 
+    def handle_block(self, block):
+        # verify bank signature
+        public_key = bank_public_key(self.next_id)
+        public_key.verify(block.signature, block.message)
+
+        # verify every transaction
+        for tx in block.txns:
+            self.validate_tx(tx)
+
+        # update utxo_set
+        for tx in block.txns:
+            self.update_utxo_set(tx)
+
+        # clean the mempool HOMEWORK
+
+        # update self.blocks (save the block to our database)
+        self.blocks.append(block)
+
+        # schedule next block
+        self.schedule_next_block()
+
     def fetch_utxos(self, public_key):
         return [utxo for utxo in self.utxo_set.values() 
                 if utxo.public_key == public_key]
@@ -125,6 +192,40 @@ class Bank:
         utxos = self.fetch_utxos(public_key)
         # Sum the amounts
         return sum([tx_out.amount for tx_out in utxos])
+
+    def make_block(self):
+        txns = deepcopy(self.mempool)
+        self.mempool = []
+        block = Block(txns)
+        block.sign(self.private_key)
+        return block
+
+    def submit_block(self):
+        # create the block
+        block = self.make_block()
+
+        # save block locally
+        self.handle_block(block)
+
+        # tell other banks
+        for address in self.peer_addresses:
+            send_message(address, "block", block)
+
+    def schedule_next_block(self):
+        if self.our_turn:
+            threading.Timer(BLOCK_TIME, self.submit_block).start()
+
+
+    def airdrop(self, tx):
+        assert len(self.blocks) == 0
+
+        # update utxo_set
+        self.update_utxo_set(tx)
+
+        # update self.blocks (save the block to our database)
+        block = Block([tx])
+        self.blocks.append(block)
+
 
 
 def prepare_message(command, data):
@@ -142,11 +243,11 @@ class TCPHandler(socketserver.BaseRequestHandler):
 
     def handle(self):
         message_bytes = self.request.recv(5000).strip()
-        print(message_bytes)
         message = deserialize(message_bytes)
         command = message["command"]
         data = message["data"]
-        print(command)
+
+        logger.info(f"Recieved {message}")
 
         if command == "ping":
             self.respond(command="pong", data="")
@@ -158,6 +259,9 @@ class TCPHandler(socketserver.BaseRequestHandler):
             except:
                 self.respond(command="tx-response", data="rejected")
 
+        if command == 'block':
+            bank.handle_block(data)
+
         if command == "utxos":
             balance = bank.fetch_utxos(data)
             self.respond(command="utxos-response", data=balance)
@@ -166,9 +270,10 @@ class TCPHandler(socketserver.BaseRequestHandler):
             balance = bank.fetch_balance(data)
             self.respond(command="balance-response", data=balance)
 
-HOST, PORT = 'localhost', 9006
+
+HOST, PORT = '0.0.0.0', 10000
 ADDRESS = (HOST, PORT)
-bank = Bank()
+bank = None
 
 
 def serve():
@@ -185,8 +290,16 @@ def send_message(address, command, data, response=False):
 
 def main(args):
     if args["serve"]:
-        from identities import alice_public_key
-        bank.issue(1000, alice_public_key)
+        global bank
+        bank_id = int(os.environ["BANK_ID"])
+        bank = Bank(
+            id=bank_id,
+            private_key=bank_private_key(bank_id)
+        )
+        # airdrop starting balances
+        bank.airdrop(airdrop_tx())
+        # start producing blocks
+        bank.schedule_next_block()
         serve()
     elif args["ping"]:
         response = send_message(ADDRESS, "ping", "", response=True)
