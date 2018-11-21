@@ -6,7 +6,8 @@
 import threading
 import random
 import my_logger
-import transactions
+import validation
+import wallet
 import globalconfig
 
 DIFFICULTY_BITS = 20
@@ -28,7 +29,7 @@ def mine_block(block):
 def mine_forever():
     my_logger.logging.info("Starting miner")
     while True:
-        unmined_block = transactions.Block(
+        unmined_block = validation.Block(
             txns=globalconfig.node.mempool,
             prev_id=globalconfig.node.blocks[-1].id,
             nonce=random.randint(0, 100000000),
@@ -43,7 +44,7 @@ def mine_forever():
 
 
 def mine_genesis_block():
-    unmined_block = transactions.Block(
+    unmined_block = validation.Block(
         txns=[],
         prev_id=None,
         nonce=0,

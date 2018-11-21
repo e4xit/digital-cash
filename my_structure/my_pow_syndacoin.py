@@ -14,7 +14,7 @@ Options:
 
 import threading
 import miner
-import transactions
+import wallet
 import networking
 import globalconfig
 
@@ -65,7 +65,7 @@ def main(args):
         utxos = response["data"]
 
         # Prepare transaction
-        tx = transactions.prepare_simple_tx(utxos, sender_private_key, recipient_public_key, amount)
+        tx = wallet.prepare_simple_tx(utxos, sender_private_key, recipient_public_key, amount)
 
         # send to node
         networking.send_message(address, "tx", tx)

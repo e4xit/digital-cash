@@ -1,11 +1,13 @@
 ##############
 # Validation #
 ##############
+import hashlib
 
 import miner
 import networking
 import os
 import my_logger
+from utils import serialize
 
 PORT = 10000
 
@@ -99,3 +101,31 @@ class Node:
         # Block Propagation
         for peer_address in self.peer_addresses:
             networking.send_message(peer_address, "block", block)
+
+
+class Block:
+
+    # prev_id points to hex hash of previous block
+
+    def __init__(self, txns, prev_id, nonce):
+        self.txns = txns
+        self.prev_id = prev_id
+        self.nonce = nonce
+
+    @property
+    def header(self):
+        return serialize(self)
+
+        # this is the same as commented line below
+        # return serialize([self.txns, self.prev_id])
+
+    @property
+    def id(self):
+        return hashlib.sha256(self.header).hexdigest()
+
+    @property
+    def proof(self):
+        return int(self.id, 16)
+
+    def __repr__(self):
+        return f"Block(prev_id={self.prev_id[:10]} id={self.id[:10]}...)"

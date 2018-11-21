@@ -3,7 +3,6 @@
 ################
 
 import uuid
-import hashlib
 
 from utils import serialize
 
@@ -54,34 +53,6 @@ class TxOut:
     @property
     def outpoint(self):
         return (self.tx_id, self.index)
-
-
-class Block:
-
-    # prev_id points to hex hash of previous block
-
-    def __init__(self, txns, prev_id, nonce):
-        self.txns = txns
-        self.prev_id = prev_id
-        self.nonce = nonce
-
-    @property
-    def header(self):
-        return serialize(self)
-
-        # this is the same as commented line below
-        # return serialize([self.txns, self.prev_id])
-
-    @property
-    def id(self):
-        return hashlib.sha256(self.header).hexdigest()
-
-    @property
-    def proof(self):
-        return int(self.id, 16)
-
-    def __repr__(self):
-        return f"Block(prev_id={self.prev_id[:10]} id={self.id[:10]}...)"
 
 
 def prepare_simple_tx(utxos, sender_private_key, recipient_public_key, amount):
