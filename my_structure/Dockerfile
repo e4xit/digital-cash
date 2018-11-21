@@ -1,0 +1,14 @@
+FROM python:3.7.0
+ADD requirements.txt ./
+RUN pip install -r requirements.txt
+ADD my_pow_syndacoin.py ./
+ADD utils.py ./
+ADD identities.py ./
+ADD transactions.py ./
+ADD networking.py ./
+ADD miner.py ./
+ADD validation.py ./
+ADD my_logger.py ./
+ADD globalconfig.py ./
+
+CMD ["python", "my_pow_syndacoin.py", "serve"]
