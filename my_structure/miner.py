@@ -7,7 +7,6 @@ import threading
 import random
 import my_logger
 import validation
-import wallet
 import globalconfig
 
 DIFFICULTY_BITS = 20

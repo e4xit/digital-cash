@@ -1,4 +1,10 @@
+##########
+# Logger #
+##########
+
 import logging
+
+import globalconfig
 
 logging.basicConfig(
     level="INFO",

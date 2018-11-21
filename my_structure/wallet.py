@@ -1,8 +1,10 @@
-################
-# Transactions #
-################
+##########
+# Wallet #
+##########
 
 import uuid
+
+import globalconfig
 
 from utils import serialize
 

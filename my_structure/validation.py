@@ -1,12 +1,15 @@
 ##############
 # Validation #
 ##############
+
+import os
 import hashlib
 
 import miner
 import networking
-import os
 import my_logger
+import globalconfig
+
 from utils import serialize
 
 PORT = 10000
