@@ -50,5 +50,3 @@ def prepare_simple_tx(utxos, sender_private_key, recipient_public_key, amount):
     tx = Tx(id=tx_id, tx_ins=tx_ins, tx_outs=tx_outs)
     for i in range(len(tx.tx_ins)):
         tx.sign_input(i, sender_private_key)
-
-    return tx
