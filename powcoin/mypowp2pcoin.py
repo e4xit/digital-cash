@@ -12,16 +12,27 @@ Options:
   --node=<node>  Hostname of node [default: node0]
 """
 
-import uuid, socketserver, socket, sys, argparse, time, os, logging, threading, hashlib, random, re, pickle
+import hashlib
+import logging
+import os
+import pickle
+import random
+import re
+import socket
+import socketserver
+import sys
+import threading
+import time
+import uuid
 
 from docopt import docopt
-from copy import deepcopy
 from ecdsa import SigningKey, SECP256k1
 
 PORT = 10000
 GET_BLOCK_CHUNK = 10
 BLOCK_SUBSIDY = 50
 node = None
+lock = threading.Lock()
 
 logging.basicConfig(level="INFO", format='%(threadName)-6s | %(message)s')
 logger = logging.getLogger(__name__)
@@ -41,7 +52,6 @@ class Tx:
 
     def sign_input(self, index, private_key):
         message = spend_message(self, index)
-        signature = private_key.sign(message)
         signature = private_key.sign(message)
         self.tx_ins[index].signature = signature
 
@@ -179,7 +189,7 @@ class Node:
             in_sum += amount
 
         for tx_out in tx.tx_outs:
-            # Sum up the total outpouts
+            # Sum up the total outputs
             out_sum += tx_out.amount
 
         # Check no value created or destroyed
@@ -296,7 +306,8 @@ def mine_forever(public_key):
         if mined_block:
             logger.info("")
             logger.info("Mined a block")
-            node.handle_block(mined_block)
+            with lock:
+                node.handle_block(mined_block)
 
 
 def mine_genesis_block(public_key):
@@ -405,7 +416,7 @@ class TCPHandler(socketserver.BaseRequestHandler):
                 if block.id not in peer_block_ids \
                         and block.prev_id in peer_block_ids:
                     height = node.blocks.index(block)
-                    blocks = node.blocks[height:height+GET_BLOCK_CHUNK]
+                    blocks = node.blocks[height:height + GET_BLOCK_CHUNK]
                     send_message(peer, "blocks", blocks)
                     logger.info("Served 'sync' request")
                     return
@@ -415,10 +426,11 @@ class TCPHandler(socketserver.BaseRequestHandler):
 
             for block in data:
                 try:
-                    node.handle_block(block)
-                    mining_interrupt.set()
+                    with lock:
+                        node.handle_block(block)
+                        mining_interrupt.set()
                 except:
-                    return # logger.info(f"Rejected block {block.id}")
+                    return  # logger.info(f"Rejected block {block.id}")
 
             if len(data) == GET_BLOCK_CHUNK:
                 node.sync()
@@ -453,7 +465,7 @@ def send_message(address, command, data, response=False):
         s.connect(address)
         s.sendall(message)
         if response:
-            return deserialize(s.recv(5000))
+            return read_message(s)
 
 
 #######
