@@ -98,7 +98,7 @@ def test_fork_chain():
     assert node.branches[0] == [alice_block]
 
 
-def test_block_extending_fork():
+def test_block_extending_branch():
     node = p.Node(address="")
 
     # Bob mines height=0,1,2
@@ -121,7 +121,7 @@ def test_block_extending_fork():
     assert len(node.branches[0]) == 2
 
 
-def test_block_forking_fork():
+def test_block_forking_branch():
     node = p.Node(address="")
 
     # Bob mines height=0,1,2
