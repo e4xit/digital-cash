@@ -2,10 +2,10 @@
 POW P2P Coin
 
 Usage:
-  mypowp2pcoin.py serve
-  mypowp2pcoin.py ping [--node <node>]
-  mypowp2pcoin.py tx <from> <to> <amount> [--node <node>]
-  mypowp2pcoin.py balance <name> [--node <node>]
+  my_powp2pcoin.py serve
+  my_powp2pcoin.py ping [--node <node>]
+  my_powp2pcoin.py tx <from> <to> <amount> [--node <node>]
+  my_powp2pcoin.py balance <name> [--node <node>]
 
 Options:
   -h --help      Show this screen.
