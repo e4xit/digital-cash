@@ -25,7 +25,7 @@ import time
 import uuid
 
 from docopt import docopt
-from ecdsa import SigningKey, SECP256k1
+from ecdsa import SECP256k1, SigningKey
 
 PORT = 10000
 GET_BLOCKS_CHUNK = 10
@@ -40,6 +40,17 @@ logger = logging.getLogger(__name__)
 def spend_message(tx, index):
     outpoint = tx.tx_ins[index].outpoint
     return serialize(outpoint) + serialize(tx.tx_outs)
+
+
+def total_work(blocks):
+    return len(blocks)
+
+
+def tx_in_to_tx_out(tx_in, blocks):
+    for block in blocks:
+        for tx in block.txns:
+            if tx.id == tx_in.tx_id:
+                return tx.tx_outs[tx_in.index]
 
 
 class Tx:
@@ -115,7 +126,8 @@ class Block:
         return self.id == other.id
 
     def __repr__(self):
-        return f"Block(prev_id={self.prev_id[:10]}... id={self.id[:10]}...)"
+        prev_id = self.prev_id[:10] if self.prev_id else None
+        return f"Block(prev_id={prev_id}... id={self.id[:10]}...)"
 
 
 class Node:
@@ -161,6 +173,22 @@ class Node:
         # Clean up mempool
         if tx in self.mempool:
             self.mempool.remove(tx)
+
+    def disconnect_tx(self, tx):
+        # Add back UTXOs spent by this tx into the mempool
+        if not tx.is_coinbase:
+            for tx_in in tx.tx_ins:
+                tx_out = tx_in_to_tx_out(tx_in, self.blocks)
+                self.utxo_set[tx_out.outpoint] = tx_out
+
+        # Remove UTXO's that were created by these transactions
+        for tx_out in tx.tx_outs:
+            del self.utxo_set[tx_out.outpoint]
+
+        # Put the transaction back in the mempool
+        if tx not in self.mempool and not tx.is_coinbase:
+            self.mempool.append(tx)
+            logging.info(f"Put tx back into the mempool")
 
     def fetch_balance(self, public_key):
         # Fetch utxos associated with this public key
@@ -225,13 +253,20 @@ class Node:
         return None, None, None
 
     def handle_block(self, block):
+        # Ignore if we've already seen the block
+        found_in_chain = block in self.blocks
+        found_in_branch = self.find_in_branch(block.id)[0] is not None
+        if found_in_branch or found_in_chain:
+            raise Exception("Received duplicate block")
+
         # Look up the previous block and unpack to multiple variables
         branch, branch_index, height = self.find_in_branch(block.prev_id)
 
         # Conditions (how we will handle the block)
         extends_chain = block.prev_id == self.blocks[-1].id
         forks_chain = not extends_chain and \
-            block.prev_id in [block.id for block in self.blocks]
+                      not branch and \
+                      block.prev_id in [block.id for block in self.blocks]
         extends_branch = branch and height == len(branch) - 1
         forks_branch = branch and height != len(branch) - 1
 
@@ -247,18 +282,51 @@ class Node:
             logger.info(f"Created branch {len(self.branches)}")
         elif extends_branch:
             branch.append(block)
-            # FIXME: reorg if this branch, now how more work than the main chain
+
+            # Reorg is branch now has more work than main chain
+            chain_ids = [block.id for block in self.blocks]
+            fork_height = chain_ids.index(branch[0].prev_id)
+            chain_since_fork = self.blocks[fork_height + 1:]
+
+            if total_work(branch) > total_work(chain_since_fork):
+                logging.info(f"Reorging to branch {branch_index}")
+                self.reorg(branch, branch_index)
+
             logger.info(f"Extended branch {branch_index} to height {len(branch) - 1}")
         elif forks_branch:
-            self.branches.append(branch[:height+1] + [block])
+            self.branches.append(branch[:height + 1] + [block])
             logger.info(f"Created branch {len(self.branches) - 1} to height \
             {len(self.branches[-1]) - 1}")
         else:
-            raise Exception("Couldn't locate parent block")
+            self.sync()
+            raise Exception("Encoutered block with unknown parent. Syncing...")
 
         # Block propagation
         for peer in self.peers:
             disrupt(func=send_message, args=[peer, "blocks", [block]])
+
+    def reorg(self, branch, branch_index):
+        # Disconnect the fork block, preserving as a branch
+        disconnected_blocks = []
+        while self.blocks[-1].id != branch[0].prev_id:
+            block = self.blocks.pop()
+            for tx in block.txns:
+                self.disconnect_tx(tx)
+            # Stick it on the front of the list by using insert)
+            disconnected_blocks.insert(0, block)
+
+        # Replace branch with newly disconnected blocks
+        self.branches[branch_index] = disconnected_blocks
+
+        # Connect branch, rollback if error encountered
+        for block in branch:
+            try:
+                self.validate_block(block, validate_txns=True)
+                self.connect_block(block)
+            except:
+                self.reorg(disconnected_blocks, branch_index)
+                logger.info("Reorg failed")
+                return
 
     def connect_block(self, block):
         # Add the block to our chain
@@ -268,7 +336,6 @@ class Node:
         for tx in block.txns:
             self.connect_tx(tx)
         # assert block.prev_id == self.blocks[-1].id
-
 
 
 def prepare_simple_tx(utxos, sender_private_key, recipient_public_key, amount):
@@ -306,14 +373,14 @@ def prepare_coinbase(public_key, tx_id=None):
     if tx_id is None:
         tx_id = uuid.uuid4()
     return Tx(
-        id=tx_id,
-        tx_ins=[
-            TxIn(None, None, None),
-        ],
-        tx_outs=[
-            TxOut(tx_id=tx_id, index=0, amount=BLOCK_SUBSIDY,
-                  public_key=public_key),
-        ],
+            id=tx_id,
+            tx_ins=[
+                TxIn(None, None, None),
+            ],
+            tx_outs=[
+                TxOut(tx_id=tx_id, index=0, amount=BLOCK_SUBSIDY,
+                      public_key=public_key),
+            ],
     )
 
 
@@ -321,7 +388,7 @@ def prepare_coinbase(public_key, tx_id=None):
 # Mining #
 ##########
 
-DIFFICULTY_BITS = 15
+DIFFICULTY_BITS = 18
 POW_TARGET = 2 ** (256 - DIFFICULTY_BITS)
 mining_interrupt = threading.Event()
 
@@ -342,9 +409,9 @@ def mine_forever(public_key):
     while True:
         coinbase = prepare_coinbase(public_key)
         unmined_block = Block(
-            txns=[coinbase] + node.mempool,
-            prev_id=node.blocks[-1].id,
-            nonce=random.randint(0, 1000000000),
+                txns=[coinbase] + node.mempool,
+                prev_id=node.blocks[-1].id,
+                nonce=random.randint(0, 1000000000),
         )
         mined_block = mine_block(unmined_block)
 
@@ -362,6 +429,7 @@ def mine_genesis_block(node, public_key):
     node.blocks.append(mined_block)
     node.connect_tx(coinbase)
     return mined_block
+
 
 ##############
 # Networking #
@@ -397,6 +465,7 @@ def prepare_message(command, data):
     serialized_message = serialize(message)
     length = len(serialized_message).to_bytes(4, 'big')
     return length + serialized_message
+
 
 def disrupt(func, args):
     # Simulate packet loss
@@ -482,7 +551,7 @@ class TCPHandler(socketserver.BaseRequestHandler):
                         node.handle_block(block)
                     mining_interrupt.set()
                 except:
-                    logger.info("Rejected block")
+                    pass # logger.info("Rejected block")
 
             if len(data) == GET_BLOCKS_CHUNK:
                 node.sync()
